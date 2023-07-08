@@ -1,18 +1,26 @@
+import os
+
+import pandas as pd
+import pygad
 import torch
+import torch_geometric.transforms as T
+from sklearn.model_selection import train_test_split
+from torch.functional import F
 from torch.optim import Adam
 from torch.optim import SGD, RMSprop
+from torch_geometric.data import HeteroData
 from torch_geometric.loader import NeighborLoader
 from torch_geometric.nn import GATConv, Linear, to_hetero
-import pygad
-from torch.functional import F
+
+from new import load_node_csv, SequenceEncoder, DateEncoder, load_edge_csv
 
 
 class GAT(torch.nn.Module):
     def __init__(self, hidden_channels, out_channels, heads):
         super().__init__()
-        self.conv1 = GATConv((-1, -1), hidden_channels, add_self_loops=False, heads=heads)
+        self.conv1 = GATConv((-1, -1), hidden_channels, add_self_loops=False, heads=heads, concat=False)
         self.lin1 = Linear(-1, hidden_channels)
-        self.conv2 = GATConv((-1, -1), out_channels, add_self_loops=False, heads=heads)
+        self.conv2 = GATConv((-1, -1), out_channels, add_self_loops=False, heads=heads, concat=False)
         self.lin2 = Linear(-1, out_channels)
 
     def forward(self, x, edge_index):
@@ -24,25 +32,25 @@ class GAT(torch.nn.Module):
 
 def get_optimizer(idx):
     optimizers = [Adam, SGD, RMSprop]
-    return optimizers[idx]
+    return optimizers[int(idx)]
 
 
 def get_aggregation(idx):
     aggrs = ['sum', 'mean', 'max', 'min', 'mul']
-    return aggrs[idx]
+    return aggrs[int(idx)]
 
 
 def create_model(solution):
     optimizer_type = get_optimizer(solution[0])
     aggregation = get_aggregation(solution[1])
-    learning_rate = solution[2]
-    heads = solution[3]
-    neurons = solution[4]
+    learning_rate = int(solution[2])
+    heads = int(solution[3])
+    neurons = int(solution[4])
 
     model = GAT(hidden_channels=neurons, out_channels=1, heads=heads)
     model = to_hetero(model, data.metadata(), aggr=aggregation)
-    optimizer = optimizer_type(lr=learning_rate)
-    model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    optimizer = optimizer_type(lr=learning_rate, params=model.parameters())
+    # model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
     return model, optimizer
 
@@ -63,7 +71,7 @@ def evaluate(model, data_loader):
     return total_loss / total_examples
 
 
-def train(model, train_loader, validation_loader, optimizer, epochs: int = 1000):
+def train(model, train_loader, validation_loader, optimizer, epochs: int = 10):
     model.train()
     best_val_loss = float('inf')
 
@@ -94,15 +102,85 @@ def train(model, train_loader, validation_loader, optimizer, epochs: int = 1000)
     return best_val_loss
 
 
+def load_twitter_data(tweets_path, users_path, articles_path):
+    import time
+
+    start = time.time()
+
+    df = pd.read_csv(tweets_path, index_col='id').sample(frac=1, random_state=42)
+    tweet_x, tweet_mapping = load_node_csv(df, index_col='id', encoders={'created_at': DateEncoder()})
+    tweet_column_max = tweet_x.max(dim=0).values
+    tweet_x = tweet_x / tweet_column_max
+    end = time.time()
+    print("loaded tweets", end - start)
+
+
+    df = pd.read_csv(users_path, index_col='id').sample(frac=1, random_state=42)
+    user_x, user_mapping = load_node_csv(df, index_col='id', encoders={'created_at': DateEncoder()})
+    user_column_max = user_x.max(dim=0).values
+    user_x = user_x / user_column_max
+    end = time.time()
+    print("loaded users", end - start)
+
+    df = pd.read_csv(articles_path, index_col='article_dir').sample(frac=1, random_state=42)
+    labels = df['label']
+    df = df.drop(columns=['label'])
+    article_x, article_mapping = load_node_csv(df, index_col='article_dir',
+                                               encoders={'content_text': SequenceEncoder()})
+    end = time.time()
+    print("loaded articles", end - start)
+
+    article_column_max = article_x.max(dim=0).values
+    article_x = article_x / article_column_max
+
+    data = HeteroData()
+    data['tweet'].x = tweet_x
+    data['article'].x = article_x
+    data['user'].x = user_x
+
+    data['article'].y = torch.tensor(labels, dtype=torch.float).unsqueeze(dim=-1)
+
+    edge_index, edge_label = load_edge_csv(
+        os.path.join('extracted_data', 'tweet_article.csv'),
+        src_index_col='tweet_id',
+        src_mapping=tweet_mapping,
+        dst_index_col='article_dir',
+        dst_mapping=article_mapping,
+    )
+    end = time.time()
+    print("loaded edge", end - start)
+
+    data['tweet', 'relates', 'article'].edge_index = edge_index
+    data['tweet', 'relates', 'article'].edge_label = edge_label
+
+    edge_index, edge_label = load_edge_csv(
+        os.path.join('extracted_data', 'user_tweet.csv'),
+        src_index_col='user_id',
+        src_mapping=user_mapping,
+        dst_index_col='tweet_id',
+        dst_mapping=tweet_mapping,
+    )
+
+    data['user', 'creates', 'tweet'].edge_index = edge_index
+    data['user', 'creates', 'tweet'].edge_label = edge_label
+
+    data = T.ToUndirected()(data)
+    data = T.AddSelfLoops()(data)
+
+    return data, article_mapping
+
+
 if __name__ == '__main__':
-    data = ...
+    tweets_path = os.path.join('extracted_data', 'tweets.csv')
+    users_path = os.path.join('extracted_data', 'users.csv')
+    articles_path = os.path.join('extracted_data', 'articles.csv')
 
-    X_train = data[0]
-    X_test = data[1]
-    train_mask = ...
-    validation_mask = ...
+    data, article_mapping = load_twitter_data(tweets_path, users_path, articles_path)
+    data_idx = list(article_mapping.values())
+    train_mask, validation_mask = train_test_split(data_idx, random_state=42)
 
-    def fitness_func(solution, sol_idx):
+
+    def fitness_func(instance, solution, sol_idx):
         train_loader = NeighborLoader(
             data,
             num_neighbors=[-1],
@@ -113,38 +191,41 @@ if __name__ == '__main__':
             data,
             num_neighbors=[-1],
             batch_size=len(validation_mask),
-            input_nodes=('article', torch.tensor(train_mask))
+            input_nodes=('article', torch.tensor(validation_mask))
         )
 
         model, optimizer = create_model(solution)
         val_accuracy = train(model, train_loader, validation_loader, optimizer)
+        print("done fitness")
         return val_accuracy
+
 
     population_size = 50
     num_generations = 10
     num_parents_mating = 10
 
-    gene_space = [{'low': 0, 'high': 3},  # optimizer type idx
-                  {'low': 0, 'high': 5},  # aggregation type idx
+    gene_space = [list(range(3)),  # optimizer type idx
+                  list(range(5)),  # aggregation type idx
                   {'low': 1, 'high': 1000},  # learning_rate * 1000
                   {'low': 1, 'high': 10},  # heads
                   {'low': 1, 'high': 300}]  # neurons
 
-    population = pygad.GA(initial_population=None,
-                          num_generations=num_generations,
-                          num_parents_mating=num_parents_mating,
-                          fitness_func=fitness_func,
-                          gene_space=gene_space,
-                          parent_selection_type="rank",
-                          crossover_type="two_points",
-                          mutation_type="random",
-                          mutation_percent_genes=10,
-                          random_mutation_min_val=1,
-                          random_mutation_max_val=100,
-                          mutation_by_replacement=True,
-                          # random_mutation_by_replacement_max_val=100
-                          )
+    ga_instance = pygad.GA(num_generations=num_generations,
+                           num_parents_mating=num_parents_mating,
+                           fitness_func=fitness_func,
+                           gene_space=gene_space,
+                           sol_per_pop=num_parents_mating * 2,
+                           num_genes=len(gene_space),
+                           parent_selection_type="rank",
+                           crossover_type="two_points",
+                           mutation_type="random",
+                           mutation_percent_genes=max(10, int(1/len(gene_space)*100)),
+                           random_mutation_min_val=1,
+                           random_mutation_max_val=100,
+                           mutation_by_replacement=True,
+                           # random_mutation_by_replacement_max_val=100
+                           )
 
-    population.run()
+    ga_instance.run()
 
     # population.best_solution()
