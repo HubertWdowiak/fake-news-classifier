@@ -102,6 +102,7 @@ def train(model, train_loader, validation_loader, optimizer, epochs: int = 10):
     return best_val_loss
 
 
+
 def load_twitter_data(tweets_path, users_path, articles_path):
     import time
 
@@ -171,9 +172,9 @@ def load_twitter_data(tweets_path, users_path, articles_path):
 
 
 if __name__ == '__main__':
-    tweets_path = os.path.join('extracted_data', 'tweets.csv')
-    users_path = os.path.join('extracted_data', 'users.csv')
-    articles_path = os.path.join('extracted_data', 'articles.csv')
+    tweets_path = os.path.join('results', 'tweets.csv')
+    users_path = os.path.join('results', 'users.csv')
+    articles_path = os.path.join('results', 'articles_df.csv')
 
     data, article_mapping = load_twitter_data(tweets_path, users_path, articles_path)
     data_idx = list(article_mapping.values())
