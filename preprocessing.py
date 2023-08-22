@@ -134,9 +134,12 @@ def get_all_hashtags(tweets_df: pd.DataFrame) -> (pd.DataFrame, pd.DataFrame):
     return hashtag_df, tweets_df, hashtag_tweet_df
 
 
-def get_all_user_mentions(tweets_df: pd.DataFrame) -> (pd.DataFrame, pd.DataFrame):
+def get_all_user_mentions(tweets_df: pd.DataFrame, users: pd.DataFrame) -> (pd.DataFrame, pd.DataFrame):
     user_mentions_tweet_df = tweets_df[['user_mentions', 'id']].explode('user_mentions').dropna().rename(
         mapper={'user_mentions': 'user_id', 'id': 'tweet_id'}, axis='columns')
+
+    user_ids = users['id'].unique()
+    user_mentions_tweet_df = user_mentions_tweet_df[user_mentions_tweet_df['user_id'].isin(user_ids)]
 
     return tweets_df, user_mentions_tweet_df
 
@@ -208,7 +211,7 @@ def load_all_csv_files(directory_paths: dict):
 
     # prepare user_mention_tweet relation
 
-    tweets, user_mention_tweet_df = get_all_user_mentions(tweets)
+    tweets, user_mention_tweet_df = get_all_user_mentions(tweets, users)
 
     tweets, tweets_retweets_df = get_all_retweets(tweets)
 
@@ -231,8 +234,8 @@ def load_all_csv_files(directory_paths: dict):
 
 
 if __name__ == '__main__':
-    load_all_csv_files({os.path.join('gossipcop', 'real'): True,
-                        os.path.join('politifact', 'real'): True,
-                        os.path.join('gossipcop', 'fake'): False,
-                        os.path.join('politifact', 'fake'): False
+    load_all_csv_files({os.path.join('gossippart', 'real'): True,
+                        # os.path.join('politifact', 'real'): True,
+                        os.path.join('gossippart', 'fake'): False,
+                        # os.path.join('politifact', 'fake'): False
                         })

@@ -37,8 +37,11 @@ def clean(articles_directories) -> pd.DataFrame:
     return pd.DataFrame(tweets_data).drop_duplicates('id')
 
 
-clean([
-       os.path.join('politifact', 'real'),
-       os.path.join('politifact', 'fake'),
-       os.path.join('gossipcop', 'real'),
-       os.path.join('gossipcop', 'fake')])
+# clean([
+#        os.path.join('politifact', 'real'),
+#        os.path.join('politifact', 'fake'),
+#        os.path.join('gossipcop', 'real'),
+#        os.path.join('gossipcop', 'fake')])
+
+clean([os.path.join('gossippart', 'fake'),
+       os.path.join('gossippart', 'real')])
