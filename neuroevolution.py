@@ -11,10 +11,12 @@ from torch.optim import SGD, RMSprop
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import NeighborLoader
 from torch_geometric.nn import GATConv, Linear, to_hetero
-
+import wandb
 
 from utils import load_node_csv, DateEncoder, DefaultEncoder, SequenceEncoder, load_edge_csv
 
+wandb.login(key='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 class GAT(torch.nn.Module):
     def __init__(self, hidden_channels, out_channels, heads):
@@ -49,7 +51,7 @@ def create_model(solution):
     neurons = int(solution[4])
 
     model = GAT(hidden_channels=neurons, out_channels=1, heads=heads)
-    model = to_hetero(model, data.metadata(), aggr=aggregation)
+    model = to_hetero(model, data.metadata(), aggr=aggregation).to(device)
     optimizer = optimizer_type(lr=learning_rate, params=model.parameters())
     # model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
@@ -72,13 +74,25 @@ def evaluate(model, data_loader):
     return total_loss / total_examples
 
 
-def train(model, train_loader, validation_loader, optimizer, epochs: int = 10):
+def train(model: GAT, train_loader: NeighborLoader, validation_loader: NeighborLoader, optimizer: torch.optim.Optimizer, epochs: int = 10):
     model.train()
     best_val_loss = float('inf')
+
+    wandb.init(
+        project="test-fake-news",
+        config={
+            "lr": optimizer.param_groups[0]['lr'],
+            'heads': model.conv2['tweet__relates__article'].heads,
+            'optimizer': optimizer.__class__.__name__,
+            'neurons': model.conv1['tweet__relates__article'].out_channels,
+            'aggregation': model.conv1['tweet__relates__article'].aggr,
+            # "dropout": random.uniform(0.01, 0.80),
+        })
 
     for epoch in range(epochs):
         total_examples = total_loss = 0
         for batch in train_loader:
+            batch = batch.to(device)
             optimizer.zero_grad()
             batch_size = batch['article'].batch_size
             out = model({k: v.float() for k, v in batch.x_dict.items()}, batch.edge_index_dict)
@@ -94,11 +108,14 @@ def train(model, train_loader, validation_loader, optimizer, epochs: int = 10):
         train_loss = total_loss / total_examples
         val_loss = evaluate(model, validation_loader)
 
+        wandb.log({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss})
         print(f"Epoch: {epoch + 1}, Train Loss: {train_loss}, Val Loss: {val_loss}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), "best_model.pt")
+
+    wandb.finish()
 
     return best_val_loss
 
