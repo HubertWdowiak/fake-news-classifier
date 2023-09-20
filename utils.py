@@ -3,10 +3,12 @@ import pandas as pd
 import torch
 from sentence_transformers import SentenceTransformer
 
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
 
 class DefaultEncoder:
     def __call__(self, x):
-        return torch.tensor(x.values).unsqueeze(1)
+        return torch.tensor(x.values).unsqueeze(1).to(device)
 
 
 class DateEncoder:
@@ -18,7 +20,7 @@ class DateEncoder:
         df['hour'] = x.apply(lambda a: pd.to_datetime(a).hour)
         df['minute'] = x.apply(lambda a: pd.to_datetime(a).minute)
         df['second'] = x.apply(lambda a: pd.to_datetime(a).second)
-        return torch.tensor(df.values)
+        return torch.tensor(df.values).to(device)
 
 
 class SequenceEncoder:
@@ -31,7 +33,7 @@ class SequenceEncoder:
         df.replace(np.nan, '', inplace=True)
         x = self.model.encode(df.values, show_progress_bar=True,
                               convert_to_tensor=True, device=self.device)
-        return x
+        return x.to(self.device)
 
 
 def load_edge_csv(path, src_index_col, src_mapping, dst_index_col, dst_mapping,
@@ -57,7 +59,7 @@ def load_node_csv(df, encoders=None, **kwargs):
     x = None
     if encoders is not None:
         xs = [encoder(df[col]) for col, encoder in encoders.items()]
-        x = torch.cat(xs, dim=-1)
+        x = torch.cat(xs, dim=-1).to(device)
 
     return x, mapping
 

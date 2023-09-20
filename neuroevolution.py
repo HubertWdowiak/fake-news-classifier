@@ -15,7 +15,7 @@ import wandb
 
 from utils import load_node_csv, DateEncoder, DefaultEncoder, SequenceEncoder, load_edge_csv
 
-wandb.login(key='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
+wandb.login(key='135f99941610a9b9fe4a7bbde768c9a35a8516b3')
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 class GAT(torch.nn.Module):
@@ -46,14 +46,13 @@ def get_aggregation(idx):
 def create_model(solution):
     optimizer_type = get_optimizer(solution[0])
     aggregation = get_aggregation(solution[1])
-    learning_rate = int(solution[2])/1000
+    learning_rate = int(solution[2]) / 1000
     heads = int(solution[3])
     neurons = int(solution[4])
 
     model = GAT(hidden_channels=neurons, out_channels=1, heads=heads)
     model = to_hetero(model, data.metadata(), aggr=aggregation).to(device)
     optimizer = optimizer_type(lr=learning_rate, params=model.parameters())
-    # model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
     return model, optimizer
 
@@ -64,6 +63,7 @@ def evaluate(model, data_loader):
 
     with torch.no_grad():
         for batch in data_loader:
+            batch = batch.to(device)
             batch_size = batch['article'].batch_size
             out = model({k: v.float() for k, v in batch.x_dict.items()}, batch.edge_index_dict)
             loss = F.binary_cross_entropy(out['article'][:batch_size], batch['article'].y[:batch_size])
@@ -74,12 +74,13 @@ def evaluate(model, data_loader):
     return total_loss / total_examples
 
 
-def train(model: GAT, train_loader: NeighborLoader, validation_loader: NeighborLoader, optimizer: torch.optim.Optimizer, epochs: int = 10):
+def train(model: GAT, train_loader: NeighborLoader, validation_loader: NeighborLoader, optimizer: torch.optim.Optimizer,
+          epochs: int = 10):
     model.train()
     best_val_loss = float('inf')
 
     wandb.init(
-        project="test-fake-news",
+        project="fake-news",
         config={
             "lr": optimizer.param_groups[0]['lr'],
             'heads': model.conv2['tweet__relates__article'].heads,
@@ -141,7 +142,8 @@ def load_twitter_data(results_path):
         'favorited': DefaultEncoder(),
         'retweeted': DefaultEncoder(),
         'is_quote_status': DefaultEncoder(),
-    })
+    },
+                                           device=device)
     tweet_column_max = tweet_x.max(dim=0).values
     tweet_column_max[tweet_column_max == 0] = 1
     tweet_x = tweet_x / tweet_column_max
@@ -160,8 +162,9 @@ def load_twitter_data(results_path):
         'default_profile': DefaultEncoder(),
         'statuses_count': DefaultEncoder(),
         'favourites_count': DefaultEncoder(),
-        'description': SequenceEncoder()
-    })
+        'description': SequenceEncoder(device=device)
+    },
+                                         device=device)
     user_column_max = user_x.max(dim=0).values
     user_column_max[user_column_max == 0] = 1
 
@@ -173,10 +176,11 @@ def load_twitter_data(results_path):
     labels = df['label']
     df = df.drop(columns=['label'])
     article_x, article_mapping = load_node_csv(df, index_col='article_dir', encoders={
-        'content_text': SequenceEncoder(),
-        'title': SequenceEncoder(),
+        'content_text': SequenceEncoder(device=device),
+        'title': SequenceEncoder(device=device),
         'n_images': DefaultEncoder()
-    })
+    },
+                                               device=device)
     end = time.time()
     print("loaded articles", end - start)
 
@@ -187,7 +191,8 @@ def load_twitter_data(results_path):
     df = pd.read_csv(sources_path, index_col='id').sample(frac=1, random_state=42)
     source_x, source_mapping = load_node_csv(df, index_col='id', encoders={
         'source': SequenceEncoder(),
-    })
+    },
+                                             device=device)
     end = time.time()
     print("loaded sources", end - start)
 
@@ -198,7 +203,8 @@ def load_twitter_data(results_path):
     df = pd.read_csv(hashtags_path, index_col='id').sample(frac=1, random_state=42)
     hashtag_x, hashtag_mapping = load_node_csv(df, index_col='id', encoders={
         'hashtag': SequenceEncoder(),
-    })
+    },
+                                               device=device)
     end = time.time()
     print("loaded hashtags", end - start)
 
@@ -210,7 +216,8 @@ def load_twitter_data(results_path):
     df['temp'] = 0
     url_x, url_mapping = load_node_csv(df, index_col='id', encoders={
         'temp': DefaultEncoder(),
-    })
+    },
+                                       device=device)
     end = time.time()
     print("loaded urls", end - start)
 
@@ -311,7 +318,19 @@ def load_twitter_data(results_path):
 
 if __name__ == '__main__':
     results_path = os.path.join('results')
-    data, article_mapping = load_twitter_data(results_path)
+    # data, article_mapping = load_twitter_data(results_path)
+
+    # torch.save(data, 'graph.pt')
+    # torch.save(article_mapping, 'mapping.pt')
+
+    data, article_mapping = torch.load('graph.pt', map_location=torch.device('cpu')), torch.load('mapping.pt', map_location=torch.device('cpu'))
+
+    data = data.edge_type_subgraph(
+        [('tweet', 'relates', 'article'), ('user', 'creates', 'tweet'), ('hashtag', 'included_in', 'tweet'),
+         ('source', 'originates', 'tweet'), ('tweet', 'replies', 'tweet'), ('url', 'is_contained', 'tweet'),
+         ('article', 'rev_relates', 'tweet'), ('tweet', 'rev_creates', 'user'), ('tweet', 'rev_included_in', 'hashtag'),
+         ('tweet', 'rev_originates', 'source'), ('tweet', 'rev_is_contained', 'url'), ('tweet', 'user')])
+
     data_idx = list(article_mapping.values())
     train_mask, validation_mask = train_test_split(data_idx, random_state=42)
 
@@ -320,19 +339,20 @@ if __name__ == '__main__':
         train_loader = NeighborLoader(
             data,
             num_neighbors=[-1],
-            batch_size=len(train_mask),
+            batch_size=len(train_mask) // 10,
             input_nodes=('article', torch.tensor(train_mask))
         )
         validation_loader = NeighborLoader(
             data,
             num_neighbors=[-1],
-            batch_size=len(validation_mask),
+            batch_size=len(validation_mask) // 10,
             input_nodes=('article', torch.tensor(validation_mask))
         )
 
         model, optimizer = create_model(solution)
-        val_accuracy = train(model, train_loader, validation_loader, optimizer)
+        val_accuracy = train(model, train_loader, validation_loader, optimizer, 100)
         print("done fitness")
+        torch.cuda.empty_cache()
         return val_accuracy
 
 
