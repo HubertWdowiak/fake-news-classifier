@@ -5,32 +5,34 @@ import pandas as pd
 import pygad
 import torch
 from sklearn.model_selection import train_test_split
-from torch.functional import F
 from torch.optim import Adam
 from torch.optim import SGD, RMSprop
 from torch_geometric.data import HeteroData
-from torch_geometric.loader import NeighborLoader
+from torch_geometric.loader import NeighborLoader, HGTLoader
+from torch.nn import BCEWithLogitsLoss, Dropout
 from torch_geometric.nn import GATConv, Linear, to_hetero
 import wandb
 
-from utils import load_node_csv, DateEncoder, DefaultEncoder, SequenceEncoder, load_edge_csv
+from utils import load_node_csv, DateEncoder, DefaultEncoder, SequenceEncoder, load_edge_csv, get_min_and_max, \
+    normalize_batch, get_class_weight_ratio
 
 wandb.login(key='135f99941610a9b9fe4a7bbde768c9a35a8516b3')
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
+
 class GAT(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels, heads):
+    def __init__(self, hidden_channels, out_channels, heads, dropout):
         super().__init__()
-        self.conv1 = GATConv((-1, -1), hidden_channels, add_self_loops=False, heads=heads, concat=False)
+        self.conv1 = GATConv((-1, -1), hidden_channels, add_self_loops=False, heads=heads, concat=False, dropout=dropout)
         self.lin1 = Linear(-1, hidden_channels)
-        self.conv2 = GATConv((-1, -1), out_channels, add_self_loops=False, heads=heads, concat=False)
+        self.conv2 = GATConv((-1, -1), out_channels, add_self_loops=False, heads=heads, concat=False, dropout=dropout)
         self.lin2 = Linear(-1, out_channels)
 
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index) + self.lin1(x)
-        x = x.relu()
+        x = x.sigmoid()
         x = self.conv2(x, edge_index) + self.lin2(x)
-        return torch.sigmoid(x)
+        return x
 
 
 def get_optimizer(idx):
@@ -49,25 +51,28 @@ def create_model(solution):
     learning_rate = int(solution[2]) / 1000
     heads = int(solution[3])
     neurons = int(solution[4])
+    dropout = solution[5] / 100
 
-    model = GAT(hidden_channels=neurons, out_channels=1, heads=heads)
+    model = GAT(hidden_channels=neurons, out_channels=1, heads=heads, dropout=dropout)
     model = to_hetero(model, data.metadata(), aggr=aggregation).to(device)
     optimizer = optimizer_type(lr=learning_rate, params=model.parameters())
 
     return model, optimizer
 
 
-def evaluate(model, data_loader):
+def evaluate(model, data_loader, class_weight, min_vals, max_vals):
     model.eval()
     total_examples = total_loss = 0
 
     with torch.no_grad():
         for batch in data_loader:
             batch = batch.to(device)
-            batch_size = batch['article'].batch_size
-            out = model({k: v.float() for k, v in batch.x_dict.items()}, batch.edge_index_dict)
-            loss = F.binary_cross_entropy(out['article'][:batch_size], batch['article'].y[:batch_size])
-
+            normalized_batch = normalize_batch(batch, min_vals, max_vals)
+            batch_size = normalized_batch['article'].batch_size
+            out = model({k: v.float() for k, v in normalized_batch.x_dict.items()}, normalized_batch.edge_index_dict)
+            loss_function = BCEWithLogitsLoss(pos_weight=class_weight)
+            loss = loss_function(out['article'][:batch_size],
+                                 normalized_batch['article'].y[:batch_size])
             total_examples += batch_size
             total_loss += float(loss) * batch_size
 
@@ -75,7 +80,7 @@ def evaluate(model, data_loader):
 
 
 def train(model: GAT, train_loader: NeighborLoader, validation_loader: NeighborLoader, optimizer: torch.optim.Optimizer,
-          epochs: int = 10):
+          epochs: int, min_vals: torch.Tensor, max_vals: torch.Tensor, class_weight: torch.Tensor, patience: int = 10):
     model.train()
     best_val_loss = float('inf')
 
@@ -87,18 +92,20 @@ def train(model: GAT, train_loader: NeighborLoader, validation_loader: NeighborL
             'optimizer': optimizer.__class__.__name__,
             'neurons': model.conv1['tweet__relates__article'].out_channels,
             'aggregation': model.conv1['tweet__relates__article'].aggr,
-            # "dropout": random.uniform(0.01, 0.80),
+            "dropout": model.conv1['tweet__relates__article'].dropout
         })
 
     for epoch in range(epochs):
         total_examples = total_loss = 0
         for batch in train_loader:
             batch = batch.to(device)
+            normalized_batch = normalize_batch(batch, min_vals, max_vals)
             optimizer.zero_grad()
-            batch_size = batch['article'].batch_size
-            out = model({k: v.float() for k, v in batch.x_dict.items()}, batch.edge_index_dict)
-            loss = F.binary_cross_entropy(out['article'][:batch_size],
-                                          batch['article'].y[:batch_size])
+            batch_size = normalized_batch['article'].batch_size
+            out = model({k: v.float() for k, v in normalized_batch.x_dict.items()}, normalized_batch.edge_index_dict)
+            loss_function = BCEWithLogitsLoss(pos_weight=class_weight)
+            loss = loss_function(out['article'][:batch_size],
+                                 normalized_batch['article'].y[:batch_size])
             loss.backward()
             optimizer.step()
 
@@ -107,14 +114,21 @@ def train(model: GAT, train_loader: NeighborLoader, validation_loader: NeighborL
         print(total_loss / total_examples)
 
         train_loss = total_loss / total_examples
-        val_loss = evaluate(model, validation_loader)
+        val_loss = evaluate(model, validation_loader, class_weight, min_vals, max_vals)
 
         wandb.log({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss})
-        print(f"Epoch: {epoch + 1}, Train Loss: {train_loss}, Val Loss: {val_loss}")
-
+        # Check for early stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), "best_model.pt")
+            patience_counter = 0  # Reset patience counter when we find a better model
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping. No improvement for {patience} epochs.")
+                break  # Stop training
+
+        print(f"Epoch: {epoch + 1}, Train Loss: {train_loss}, Val Loss: {val_loss}")
 
     wandb.finish()
 
@@ -323,7 +337,9 @@ if __name__ == '__main__':
     # torch.save(data, 'graph.pt')
     # torch.save(article_mapping, 'mapping.pt')
 
-    data, article_mapping = torch.load('graph.pt', map_location=torch.device('cpu')), torch.load('mapping.pt', map_location=torch.device('cpu'))
+    data, article_mapping = torch.load('graph.pt', map_location=torch.device('cpu')), torch.load('mapping.pt',
+                                                                                                 map_location=torch.device(
+                                                                                                     'cpu'))
 
     data = data.edge_type_subgraph(
         [('tweet', 'relates', 'article'), ('user', 'creates', 'tweet'), ('hashtag', 'included_in', 'tweet'),
@@ -334,23 +350,26 @@ if __name__ == '__main__':
     data_idx = list(article_mapping.values())
     train_mask, validation_mask = train_test_split(data_idx, random_state=42)
 
+    min_vals, max_vals = get_min_and_max(data, train_mask)
+    class_weights = get_class_weight_ratio(data, train_mask)
+
 
     def fitness_func(instance, solution, sol_idx):
-        train_loader = NeighborLoader(
+        train_loader = HGTLoader(
             data,
-            num_neighbors=[-1],
+            num_samples={key: [512] * 4 for key in data.node_types},
             batch_size=len(train_mask) // 10,
-            input_nodes=('article', torch.tensor(train_mask))
+            input_nodes=('article', torch.tensor(train_mask)),
         )
-        validation_loader = NeighborLoader(
+        validation_loader = HGTLoader(
             data,
-            num_neighbors=[-1],
+            num_samples={key: [512] * 4 for key in data.node_types},
             batch_size=len(validation_mask) // 10,
-            input_nodes=('article', torch.tensor(validation_mask))
+            input_nodes=('article', torch.tensor(validation_mask)),
         )
 
         model, optimizer = create_model(solution)
-        val_accuracy = train(model, train_loader, validation_loader, optimizer, 100)
+        val_accuracy = train(model, train_loader, validation_loader, optimizer, 100, min_vals, max_vals, class_weights)
         print("done fitness")
         torch.cuda.empty_cache()
         return val_accuracy
@@ -364,7 +383,8 @@ if __name__ == '__main__':
                   list(range(5)),  # aggregation type idx
                   {'low': 1, 'high': 1000},  # learning_rate * 1000
                   {'low': 1, 'high': 10},  # heads
-                  {'low': 1, 'high': 300}]  # neurons
+                  {'low': 1, 'high': 300}, # neurons
+                  {'low': 1, 'high': 100}]  # dropout
 
     ga_instance = pygad.GA(num_generations=num_generations,
                            num_parents_mating=num_parents_mating,

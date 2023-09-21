@@ -55,10 +55,15 @@ def get_all_retweets(tweets_df):
 # return retweets_data
 def get_articles_data(articles_directories: dict) -> pd.DataFrame:
     articles_data = []
+    print("start")
     for articles_directory, label in articles_directories.items():
-        for single_article_dir in os.listdir(articles_directory):
-            single_article_dir_path = os.path.join(articles_directory, single_article_dir)
+        j = 0
+        for i, single_article_dir in enumerate(os.listdir(articles_directory)):
+            j += 1
 
+            single_article_dir_path = os.path.join(articles_directory, single_article_dir)
+            if not i%100:
+                print(f'article {i} - {single_article_dir_path}')
             try:
                 news_data = extract_news_data(single_article_dir_path, single_article_dir)
                 news_data['label'] = label
@@ -66,13 +71,17 @@ def get_articles_data(articles_directories: dict) -> pd.DataFrame:
                     articles_data.append(news_data)
             except FileNotFoundError:
                 pass
-
-    return pd.DataFrame(articles_data).drop_duplicates()
+            if j == 500:
+                break
+    articles_data = pd.DataFrame(articles_data).drop_duplicates()
+    articles_data.to_csv('raw_articles_data.csv')
+    return articles_data
 
 
 def get_tweets_data(articles_directories) -> pd.DataFrame:
     tweets_data = []
     for articles_directory in articles_directories:
+        i = 0
         for single_article_dir in os.listdir(articles_directory):
             try:
                 single_article_dir_path = os.path.join(articles_directory, single_article_dir)
@@ -82,6 +91,9 @@ def get_tweets_data(articles_directories) -> pd.DataFrame:
                     single_file_tweet_data = extract_tweet_data(tweet_path, single_article_dir)
                     if single_file_tweet_data:
                         tweets_data.append(single_file_tweet_data)
+                i += 1
+                if i == 500:
+                    break
             except FileNotFoundError:
                 pass
         return pd.DataFrame(tweets_data).drop_duplicates('id')
@@ -196,7 +208,7 @@ def load_all_csv_files(directory_paths: dict):
         mapper={'id': 'reply_tweet_id', 'in_reply_to_status_id_str': 'source_tweet_id'},
         axis='columns')
     tweet_reply_tweet = tweet_reply_tweet.dropna()
-
+    tweet_reply_tweet = tweet_reply_tweet[tweet_reply_tweet['source_tweet_id'].isin(tweets['id'])]
     # prepare tweet_hashtag relation
 
     hashtag_df, tweets, hashtag_tweet_df = get_all_hashtags(tweets)
@@ -234,8 +246,13 @@ def load_all_csv_files(directory_paths: dict):
 
 
 if __name__ == '__main__':
-    load_all_csv_files({os.path.join('gossippart', 'real'): True,
-                        # os.path.join('politifact', 'real'): True,
-                        os.path.join('gossippart', 'fake'): False,
-                        # os.path.join('politifact', 'fake'): False
+    load_all_csv_files({'C:\\Users\\Hubert\\Downloads\\code\\code\\fakenewsnet_dataset\\gossipcop\\real': True,
+                        'C:\\Users\\Hubert\\Downloads\\code\\code\\fakenewsnet_dataset\\gossipcop\\fake': False,
+                        'C:\\Users\\Hubert\\Downloads\\code\\code\\fakenewsnet_dataset\\politifact\\real': True,
+                        'C:\\Users\\Hubert\\Downloads\\code\\code\\fakenewsnet_dataset\\politifact\\fake': False,
                         })
+ # load_all_csv_files({os.path.join('gossippart', 'real'): True,
+    #                     # os.path.join('politifact', 'real'): True,
+    #                     os.path.join('gossippart', 'fake'): False,
+    #                     # os.path.join('politifact', 'fake'): False
+    #                     })

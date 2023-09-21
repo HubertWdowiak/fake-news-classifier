@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sentence_transformers import SentenceTransformer
+from torch_geometric.data import HeteroData
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -52,7 +53,6 @@ def load_edge_csv(path, src_index_col, src_mapping, dst_index_col, dst_mapping,
     return edge_index, edge_attr
 
 
-
 def load_node_csv(df, encoders=None, **kwargs):
     mapping = {index: i for i, index in enumerate(df.index.unique())}
 
@@ -63,3 +63,23 @@ def load_node_csv(df, encoders=None, **kwargs):
 
     return x, mapping
 
+
+def get_min_and_max(data, train_mask):
+    train_data = data.subgraph({'article': torch.tensor(train_mask)})
+    node_stores = train_data.node_stores
+    max_vals = [torch.max(node_store.x, axis=0)[0] for node_store in node_stores]
+    min_vals = [torch.min(node_store.x, axis=0)[0] for node_store in node_stores]
+    return min_vals, max_vals
+
+
+def normalize_batch(batch: HeteroData, min_values: torch.Tensor, max_values: torch.Tensor):
+    for i in range(len(batch.node_stores)):
+        batch.node_stores[i].x = (batch.node_stores[i].x - min_values[i]) / (max_values[i] - min_values[i])
+        batch.node_stores[i].x = batch.node_stores[i].x.nan_to_num()
+    return batch
+
+
+def get_class_weight_ratio(data: HeteroData, train_mask):
+    labels = data.subgraph({'article': torch.tensor(train_mask)}).node_stores[0].y.view(-1).type(torch.int64)
+    class_count = torch.bincount(labels)
+    return class_count[0] / class_count[1]
