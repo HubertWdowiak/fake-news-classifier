@@ -16,7 +16,7 @@ import wandb
 from utils import load_node_csv, DateEncoder, DefaultEncoder, SequenceEncoder, load_edge_csv, get_min_and_max, \
     normalize_batch, get_class_weight_ratio
 
-wandb.login(key='135f99941610a9b9fe4a7bbde768c9a35a8516b3')
+wandb.login(key='')
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
